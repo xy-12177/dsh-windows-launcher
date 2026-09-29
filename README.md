@@ -8,7 +8,8 @@ with a startup progress window, plus a dsh plugin that shuts the instance down a
 | 部分 | 是什么 | 运行在哪 |
 | --- | --- | --- |
 | **启动进度窗**（`launcher/`） | 桌面快捷方式 → 无黑窗启动 `dsh web`，显示带阶段文字、计时和进度条的小卡片，就绪后在 Edge 新窗口打开并置前 | 启动器进程（dsh 起来**之前**） |
-| **自动关闭实例**（`lib/`，插件名 `dsh-auto-shutdown`） | 浏览器页面全部断开并持续超过宽限期（默认 5 秒）后，让 dsh 实例优雅退出 | dsh 服务进程内部 |
+<img width="892" height="250" alt="image" src="https://github.com/user-attachments/assets/63d8ade9-d955-4708-819a-88b41ba90153" />
+
 
 进度窗必须在 dsh 启动前就出现，所以它做不成 dsh 插件（插件要等服务起来才会加载）。
 两者放在同一个仓库里，由 `install.ps1` 一次装好。
