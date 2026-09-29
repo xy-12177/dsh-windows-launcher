@@ -25,7 +25,7 @@ with a startup progress window, plus a dsh plugin that shuts the instance down a
 ## 安装
 
 ```powershell
-git clone https://github.com/<you>/dsh-windows-launcher.git
+git clone https://github.com/xy-12177/dsh-windows-launcher.git
 cd dsh-windows-launcher
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```

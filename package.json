@@ -29,5 +29,10 @@
     "dsh-plugin",
     "windows",
     "launcher"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xy-12177/dsh-windows-launcher.git"
+  },
+  "homepage": "https://github.com/xy-12177/dsh-windows-launcher#readme"
 }
