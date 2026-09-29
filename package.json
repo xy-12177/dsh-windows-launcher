@@ -1,0 +1,33 @@
+{
+  "name": "dsh-auto-shutdown",
+  "version": "0.1.0",
+  "description": "Windows launcher (progress window) + auto-shutdown watchdog for DeepSeek Harness (dsh web).",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "windows",
+    "launcher"
+  ]
+}
