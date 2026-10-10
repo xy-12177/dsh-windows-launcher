@@ -1,5 +1,5 @@
-param(
-    [ValidateSet('Compile','Capture','PreviewIsolation','StaticSample','Flows')]
+﻿param(
+    [ValidateSet('Compile','Capture','PreviewIsolation','StaticSample','Flows','Fallback')]
     [string]$Mode = 'Compile',
     [string]$SourcePath = (Join-Path $PSScriptRoot '..\launcher\start-dsh.ps1'),
     [string]$OutputDir = (Join-Path $PSScriptRoot '..\images'),
@@ -76,7 +76,7 @@ if ($Mode -eq 'Capture') {
             try {
                 $actualScale = $form.GetType().GetField('_k',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($form)
                 if ([Math]::Abs($actualScale-$scale) -gt 0.01) { throw "DPI injection failed: requested $scale, got $actualScale." }
-                if ($form.ClientSize.Width -ne [int](760*$scale) -or $form.ClientSize.Height -ne [int](320*$scale)) { throw "DPI-scaled client size mismatch: $($form.ClientSize.Width)x$($form.ClientSize.Height)." }
+                if ($form.ClientSize.Width -ne [int](760*$scale) -or $form.ClientSize.Height -ne [int](360*$scale)) { throw "DPI-scaled client size mismatch: $($form.ClientSize.Width)x$($form.ClientSize.Height)." }
                 $form.SetProgress(68,'正在等待服务就绪…')
                 if ($form.Stage -ne '正在等待服务就绪…') { throw 'SetProgress did not update the stage text.' }
                 if ($null -eq $form.GetType().GetField('_stageArt',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($form)) { throw 'SetProgress did not produce cached stage artwork.' }
@@ -181,4 +181,33 @@ if ($Mode -eq 'StaticSample') {
 if ($Mode -eq 'Flows') {
     & (Join-Path $PSScriptRoot 'Simulate-LauncherFlows.ps1') -SourcePath $SourcePath
     if ($LASTEXITCODE -ne 0) { throw 'Launcher flow simulations failed.' }
+}
+
+if ($Mode -eq 'Fallback') {
+    $assetDir = Split-Path -Parent $SourcePath
+    $logo = Join-Path $assetDir 'deepseek-logo.png'
+    $mascot = Join-Path $assetDir 'whale-maid-static.png'
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('dsh-fallback-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temp | Out-Null
+    try {
+        Copy-Item -LiteralPath $logo -Destination (Join-Path $temp 'deepseek-logo.png')
+        $bad = Join-Path $temp 'corrupt.png'
+        [IO.File]::WriteAllBytes($bad,[byte[]](1,2,3,4,5,6))
+        foreach ($case in @(@{Name='missing';Path=(Join-Path $temp 'missing.png')},@{Name='corrupt';Path=$bad})) {
+            $form = [DshProgressForm]::new('DeepSeek Harness','正在等待服务就绪…',$logo,$case.Path)
+            try {
+                $loaded = $form.GetType().GetField('_mascot',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($form)
+                if ($null -eq $loaded) { throw "$($case.Name) mascot did not fall back to the adjacent logo." }
+                $form.CreateControl()
+                $bitmap = [Drawing.Bitmap]::new($form.ClientSize.Width,$form.ClientSize.Height)
+                try { $form.DrawToBitmap($bitmap,[Drawing.Rectangle]::new(0,0,$bitmap.Width,$bitmap.Height)) }
+                finally { $bitmap.Dispose() }
+            } finally { $form.Close(); $form.Dispose() }
+            Write-Output "PASS: $($case.Name) mascot fallback renders and closes."
+        }
+    } finally {
+        $full = [IO.Path]::GetFullPath($temp); $root = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        if (-not $full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to remove fallback temp outside TEMP.' }
+        Remove-Item -LiteralPath $full -Recurse -Force
+    }
 }

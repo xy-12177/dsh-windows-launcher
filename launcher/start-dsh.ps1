@@ -65,7 +65,7 @@ $errLog    = Join-Path $runDir 'server.err'
 $stateFile = Join-Path $runDir 'state.json'
 
 # --- launch progress window -------------------------------------------------
-# A borderless 760x320 card (DeepSeek logo, product name, static whale-maid,
+# A shaped 760x360 card (DeepSeek logo, product name, static whale-maid,
 # stage text, elapsed clock, progress bar) that appears before startup begins.
 # It follows the system light/dark theme and scales to DPI. It is compiled as C# so that it can
 # live on its own background STA thread with a real message pump: the launcher
@@ -97,7 +97,8 @@ public class DshProgressForm : Form {
     private int _lastSecond = -1;
     private string _lastTimeText = "";
     private readonly DateTime _start = DateTime.Now;
-    private readonly Bitmap _logo, _mascot, _background, _wordmark;
+    private readonly Bitmap _logo, _mascot, _wordmark;
+    private Bitmap _background;
     private Bitmap _stageArt, _timeArt;
     private readonly float _k;
     private readonly Color _bg, _bgEnd, _track, _edge;
@@ -126,10 +127,10 @@ public class DshProgressForm : Form {
         // here fires OnHandleCreated before the final ClientSize is assigned.
         using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) { _k = g.DpiX / 96f; }
 
-        _logo = LoadFitted(logoPath, S(48), S(48));
-        _mascot = LoadFitted(mascotPath, S(240), S(272));
+        _logo = LoadFitted(logoPath, S(42), S(42));
+        _mascot = LoadFitted(mascotPath, S(307), S(348));
         if (_mascot == null && !string.IsNullOrEmpty(mascotPath))
-            _mascot = LoadFitted(Path.Combine(Path.GetDirectoryName(mascotPath) ?? "", "deepseek-logo.png"), S(240), S(272));
+            _mascot = LoadFitted(Path.Combine(Path.GetDirectoryName(mascotPath) ?? "", "deepseek-logo.png"), S(307), S(348));
 
         Text = title;
         FormBorderStyle = FormBorderStyle.None;
@@ -137,8 +138,8 @@ public class DshProgressForm : Form {
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         BackColor = _bg;
-        ClientSize = new Size(S(760), S(320));
-        _wordmark = BuildWordmark(Title, S(360), S(60), dark);
+        ClientSize = new Size(S(760), S(360));
+        _wordmark = BuildWordmark(Title, S(340), S(49), dark);
         _stageArt = BuildFooterArtwork(Stage, S(430), S(36), S(24), true, dark);
         UpdateTimeArtwork();
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
@@ -330,28 +331,78 @@ public class DshProgressForm : Form {
         _timeArt = next;
         _lastTimeText = text;
         if (old != null) old.Dispose();
-        Invalidate(new Rectangle(S(44), S(260), S(240), S(29)));
+        Invalidate(new Rectangle(S(48), S(216), S(240), S(32)));
     }
 
-    private GraphicsPath CardPath(Rectangle r, int radius) {
-        GraphicsPath p = new GraphicsPath();
+    private int MascotRightAt(int physicalY) {
+        if (_mascot == null) return S(468);
+        int top = S(4), left = S(435);
+        int row = physicalY - top;
+        if (row < 0 || row >= _mascot.Height) return -1;
+        for (int x = _mascot.Width - 1; x >= 0; x--) {
+            if (_mascot.GetPixel(x, row).A >= 12) return left + x;
+        }
+        return -1;
+    }
+
+    private GraphicsPath CardPath() {
+        int left = S(24), top = S(60), bottom = S(340), radius = S(18);
         int d = Math.Max(2, radius * 2);
-        p.AddArc(r.X, r.Y, d, d, 180, 90);
-        p.AddArc(r.Right-d, r.Y, d, d, 270, 90);
-        p.AddArc(r.Right-d, r.Bottom-d, d, d, 0, 90);
-        p.AddArc(r.X, r.Bottom-d, d, d, 90, 90);
-        p.CloseFigure();
-        return p;
+        List<Point> edge = new List<Point>();
+        int previous = S(470);
+        int step = Math.Max(1, S(1));
+        for (int y = top; y <= bottom; y += step) {
+            int right = MascotRightAt(y);
+            if (right >= 0) previous = right + Math.Max(1, S(1));
+            edge.Add(new Point(Math.Min(ClientSize.Width - 1, previous), y));
+        }
+        if (edge.Count == 0 || edge[edge.Count - 1].Y != bottom)
+            edge.Add(new Point(Math.Min(ClientSize.Width - 1, previous), bottom));
+
+        GraphicsPath path = new GraphicsPath();
+        path.StartFigure();
+        path.AddLine(left + radius, top, edge[0].X, top);
+        if (edge.Count > 1) path.AddLines(edge.ToArray());
+        path.AddLine(edge[edge.Count - 1].X, bottom, left + radius, bottom);
+        path.AddArc(left, bottom - d, d, d, 90, 90);
+        path.AddLine(left, bottom - radius, left, top + radius);
+        path.AddArc(left, top, d, d, 180, 90);
+        path.CloseFigure();
+        return path;
     }
 
-    private void UpdateCardRegion() {
+    private GraphicsPath MascotRegionPath() {
+        GraphicsPath path = new GraphicsPath();
+        if (_mascot == null) return path;
+        int left = S(435), top = S(4), cardTop = S(60);
+        int rowsAboveCard = Math.Min(_mascot.Height, cardTop - top);
+        // The card contains the entire mascot below its top edge; only add
+        // pixels above it so the head can overhang without a rectangular HWND.
+        for (int y = 0; y < rowsAboveCard; y++) {
+            int x = 0;
+            while (x < _mascot.Width) {
+                while (x < _mascot.Width && _mascot.GetPixel(x, y).A < 12) x++;
+                int start = x;
+                while (x < _mascot.Width && _mascot.GetPixel(x, y).A >= 12) x++;
+                if (x > start) path.AddRectangle(new Rectangle(left + start, top + y, x - start, 1));
+            }
+        }
+        return path;
+    }
+
+    private void UpdateWindowRegion() {
         if (_updatingRegion || !IsHandleCreated || IsDisposed || ClientSize.Width < 2 || ClientSize.Height < 2) return;
         if (_regionSize == ClientSize && Region != null) return;
         _updatingRegion = true;
         try {
-            using (GraphicsPath path = CardPath(new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), S(22))) {
-                // Control.Region owns this object and disposes its previous value.
-                Region = new Region(path);
+            using (GraphicsPath card = CardPath())
+            using (GraphicsPath figure = MascotRegionPath()) {
+                Region combined = new Region(card);
+                if (figure.PointCount > 0) combined.Union(figure);
+                using (Region clientBounds = new Region(new Rectangle(Point.Empty, ClientSize)))
+                    combined.Intersect(clientBounds);
+                // Control.Region owns the assigned object and releases its predecessor.
+                Region = combined;
             }
             _regionSize = ClientSize;
         } finally {
@@ -365,25 +416,18 @@ public class DshProgressForm : Form {
             g.Clear(Color.Transparent);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle bounds = new Rectangle(0, 0, width, height);
-            using (GraphicsPath card = CardPath(bounds, S(22)))
+            using (GraphicsPath card = CardPath())
             using (LinearGradientBrush fill = new LinearGradientBrush(bounds, _bg, _bgEnd, LinearGradientMode.Vertical))
                 g.FillPath(fill, card);
-            RectangleF arc = new RectangleF(width-S(295), height-S(174), S(310), S(230));
-            using (GraphicsPath glowPath = new GraphicsPath()) {
-                glowPath.AddEllipse(arc);
-                using (PathGradientBrush glow = new PathGradientBrush(glowPath)) {
-                    glow.CenterColor = Color.FromArgb(22, 103, 147, 255);
-                    glow.SurroundColors = new Color[] { Color.FromArgb(0, 147, 136, 235) };
-                    g.FillPath(glow, glowPath);
-                }
-            }
-            using (Pen blue = new Pen(Color.FromArgb(18, 104, 149, 242), Math.Max(1f, S(1))))
-            using (Pen violet = new Pen(Color.FromArgb(14, 146, 112, 220), Math.Max(1f, S(1)))) {
-                g.DrawArc(blue, width-S(286), height-S(151), S(286), S(188), 194, 132);
-                g.DrawArc(violet, width-S(249), height-S(130), S(249), S(162), 198, 120);
-            }
         }
         return b;
+    }
+
+    private void RebuildBackground() {
+        Bitmap next = BuildBackground(ClientSize.Width, ClientSize.Height);
+        Bitmap old = _background;
+        _background = next;
+        if (old != null) old.Dispose();
     }
 
     protected override CreateParams CreateParams {
@@ -394,18 +438,20 @@ public class DshProgressForm : Form {
         base.OnHandleCreated(e);
         try {
             _regionSize = Size.Empty;
-            UpdateCardRegion();
-            int round = 2; DwmSetWindowAttribute(Handle, 33, ref round, 4);
+            UpdateWindowRegion();
             int policy = 2; DwmSetWindowAttribute(Handle, 2, ref policy, 4);
-            Margins m = new Margins(); m.B = 1; DwmExtendFrameIntoClientArea(Handle, ref m);
-            int border = ColorTranslator.ToWin32(_edge);
-            DwmSetWindowAttribute(Handle, 34, ref border, 4);
         } catch { }
     }
 
     protected override void OnSizeChanged(EventArgs e) {
         base.OnSizeChanged(e);
-        try { UpdateCardRegion(); } catch { }
+        if (_updatingRegion || !IsHandleCreated || IsDisposed) return;
+        try {
+            RebuildBackground();
+            _regionSize = Size.Empty;
+            UpdateWindowRegion();
+            Invalidate();
+        } catch { }
     }
 
     protected override void OnLoad(EventArgs e) {
@@ -431,9 +477,9 @@ public class DshProgressForm : Form {
             Bitmap old = _stageArt;
             _stageArt = next;
             if (old != null) old.Dispose();
-            Invalidate(new Rectangle(S(44), S(216), S(440), S(40)));
+            Invalidate(new Rectangle(S(48), S(176), S(440), S(42)));
         }
-        Invalidate(new Rectangle(S(44), S(288), S(672), S(12)));
+        Invalidate(new Rectangle(S(48), S(292), S(430), S(18)));
     }
 
     protected override void OnPaint(PaintEventArgs e) {
@@ -443,14 +489,12 @@ public class DshProgressForm : Form {
         if (_background != null) g.DrawImageUnscaled(_background, 0, 0);
         else g.Clear(_bg);
 
-        if (_logo != null) g.DrawImageUnscaled(_logo, S(48), S(68));
-        if (_mascot != null) g.DrawImageUnscaled(_mascot, S(490), S(16));
+        if (_logo != null) g.DrawImageUnscaled(_logo, S(50), S(101));
+        if (_wordmark != null) g.DrawImageUnscaled(_wordmark, S(106), S(98));
+        if (_stageArt != null) g.DrawImageUnscaled(_stageArt, S(52), S(178));
+        if (_timeArt != null) g.DrawImageUnscaled(_timeArt, S(52), S(220));
 
-        if (_wordmark != null) g.DrawImageUnscaled(_wordmark, S(110), S(64));
-        if (_stageArt != null) g.DrawImageUnscaled(_stageArt, S(48), S(218));
-        if (_timeArt != null) g.DrawImageUnscaled(_timeArt, S(48), S(262));
-
-        RectangleF track = new RectangleF(S(48), S(292), S(664), S(5));
+        RectangleF track = new RectangleF(S(52), S(296), S(420), S(10));
         using (GraphicsPath tp = Pill(track))
         using (SolidBrush tb = new SolidBrush(_track)) g.FillPath(tb, tp);
         float w = track.Width * _shown / 100f;
@@ -460,6 +504,7 @@ public class DshProgressForm : Form {
             using (LinearGradientBrush accent = new LinearGradientBrush(track, Accent1, Accent2, LinearGradientMode.Horizontal))
                 g.FillPath(accent, fp);
         }
+        if (_mascot != null) g.DrawImageUnscaled(_mascot, S(435), S(4));
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e) {
