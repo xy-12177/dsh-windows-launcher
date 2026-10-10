@@ -36,7 +36,10 @@ param(
     [int]$Port = 4080,
     [int]$WaitMs = 90000,
     [string]$WorkDir = '',
-    [switch]$AppWindow
+    [switch]$AppWindow,
+    [switch]$Preview,
+    [switch]$StaticMascot,
+    [int]$PreviewSeconds = 12
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,7 +58,6 @@ if (Test-Path -LiteralPath $configFile) {
     } catch { }
 }
 if ([string]::IsNullOrWhiteSpace($WorkDir)) { $WorkDir = Join-Path $env:USERPROFILE 'dsh-workspace' }
-if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 
 $runDir    = Join-Path $PSScriptRoot '.run'
 $outLog    = Join-Path $runDir 'server.log'
@@ -63,17 +65,19 @@ $errLog    = Join-Path $runDir 'server.err'
 $stateFile = Join-Path $runDir 'state.json'
 
 # --- launch progress window -------------------------------------------------
-# A small borderless card (logo, stage text, elapsed clock, progress bar) that
-# appears right after the shortcut click and tracks the real startup stages
-# below. It follows the system light/dark theme and paints crisply at any DPI. It is compiled as C# so that it can
+# A borderless 760x320 card (DeepSeek logo, product name, static whale-maid,
+# stage text, elapsed clock, progress bar) that appears before startup begins.
+# It follows the system light/dark theme and scales to DPI. It is compiled as C# so that it can
 # live on its own background STA thread with a real message pump: the launcher
 # thread spends most of its time in Start-Sleep polling loops, and the window
 # must keep painting and never show "Not Responding" during the up-to-90s
-# readiness wait. No files are created; the window dies with this process.
+# readiness wait. The optional -Preview path exercises the window only and
+# returns before creating a workspace or run-state files.
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @"
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -82,261 +86,461 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-    // Borderless, owner-drawn progress card. Everything is painted in OnPaint so
-    // it stays crisp at any DPI and follows the system light/dark app theme.
-    // The form owns the elapsed-time clock and the bar easing/shimmer (a 16 ms
-    // UI timer); the launcher only ever moves the target percent and the text.
-    public class DshProgressForm : Form {
-        [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
-        [DllImport("dwmapi.dll")] private static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref Margins m);
-        [StructLayout(LayoutKind.Sequential)] private struct Margins { public int L, R, T, B; }
+public class DshProgressForm : Form {
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+    [DllImport("dwmapi.dll")] private static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref Margins m);
+    [StructLayout(LayoutKind.Sequential)] private struct Margins { public int L, R, T, B; }
 
-        public string Title = "";
-        public string Stage = "";
-        public float Target;
-        private float _shown;
-        private float _phase;
-        private readonly DateTime _start = DateTime.Now;
-        private readonly Bitmap _logo;
-        private readonly float _k;
-        private readonly Color _bg, _fg, _sub, _track, _edge;
-        private static readonly Color Accent1 = Color.FromArgb(92, 124, 255);
-        private static readonly Color Accent2 = Color.FromArgb(52, 72, 222);
-        private readonly Font _titleFont, _stageFont, _timeFont;
-        private readonly System.Windows.Forms.Timer _tick;
+    public string Title = "";
+    public string Stage = "";
+    private int _shown;
+    private int _lastSecond = -1;
+    private string _lastTimeText = "";
+    private readonly DateTime _start = DateTime.Now;
+    private readonly Bitmap _logo, _mascot, _background, _wordmark;
+    private Bitmap _stageArt, _timeArt;
+    private readonly float _k;
+    private readonly Color _bg, _bgEnd, _track, _edge;
+    private readonly bool _dark;
+    private static readonly Color Accent1 = Color.FromArgb(92, 124, 255);
+    private static readonly Color Accent2 = Color.FromArgb(140, 109, 236);
+    private readonly System.Windows.Forms.Timer _tick;
+    private Size _regionSize = Size.Empty;
+    private bool _updatingRegion;
 
-        public DshProgressForm(string title, string stage, string logoPath) {
-            Title = title; Stage = stage;
-            bool dark = false;
-            try {
-                object v = Microsoft.Win32.Registry.GetValue(
-                    @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                    "AppsUseLightTheme", 1);
-                dark = v is int && (int)v == 0;
-            } catch { }
-            _bg    = dark ? Color.FromArgb(32, 33, 38)    : Color.FromArgb(255, 255, 255);
-            _fg    = dark ? Color.FromArgb(240, 241, 245) : Color.FromArgb(24, 26, 34);
-            _sub   = dark ? Color.FromArgb(160, 164, 176) : Color.FromArgb(104, 110, 124);
-            _track = dark ? Color.FromArgb(52, 54, 62)    : Color.FromArgb(232, 235, 244);
-            _edge  = dark ? Color.FromArgb(60, 62, 70)    : Color.FromArgb(222, 225, 232);
+    public DshProgressForm(string title, string stage, string logoPath, string mascotPath) {
+        Title = title; Stage = stage;
+        bool dark = false;
+        try {
+            object v = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "AppsUseLightTheme", 1);
+            dark = v is int && (int)v == 0;
+        } catch { }
+        _dark = dark;
+        _bg = dark ? Color.FromArgb(34, 36, 44) : Color.FromArgb(255, 255, 255);
+        _bgEnd = dark ? Color.FromArgb(40, 43, 54) : Color.FromArgb(246, 249, 255);
+        _track = dark ? Color.FromArgb(61, 64, 76) : Color.FromArgb(229, 234, 245);
+        _edge = dark ? Color.FromArgb(63, 67, 80) : Color.FromArgb(231, 235, 244);
+        // Read system DPI without creating this Form's HWND. CreateGraphics()
+        // here fires OnHandleCreated before the final ClientSize is assigned.
+        using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) { _k = g.DpiX / 96f; }
 
-            if (!string.IsNullOrEmpty(logoPath) && File.Exists(logoPath)) {
+        _logo = LoadFitted(logoPath, S(48), S(48));
+        _mascot = LoadFitted(mascotPath, S(240), S(272));
+        if (_mascot == null && !string.IsNullOrEmpty(mascotPath))
+            _mascot = LoadFitted(Path.Combine(Path.GetDirectoryName(mascotPath) ?? "", "deepseek-logo.png"), S(240), S(272));
+
+        Text = title;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        BackColor = _bg;
+        ClientSize = new Size(S(760), S(320));
+        _wordmark = BuildWordmark(Title, S(360), S(60), dark);
+        _stageArt = BuildFooterArtwork(Stage, S(430), S(36), S(24), true, dark);
+        UpdateTimeArtwork();
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        _background = BuildBackground(ClientSize.Width, ClientSize.Height);
+        _tick = new System.Windows.Forms.Timer();
+        _tick.Interval = 1000;
+        _tick.Tick += delegate(object s, EventArgs e) {
+            int second = (int)(DateTime.Now - _start).TotalSeconds;
+            if (second != _lastSecond) {
+                _lastSecond = second;
+                UpdateTimeArtwork();
+            }
+        };
+        _tick.Start();
+    }
+
+    private int S(float v) { return (int)Math.Round(v * _k); }
+
+    private static Bitmap LoadFitted(string path, int width, int height) {
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+        try {
+            using (MemoryStream ms = new MemoryStream(File.ReadAllBytes(path)))
+            using (Image source = Image.FromStream(ms)) {
+                Bitmap result = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                using (Graphics g = Graphics.FromImage(result)) {
+                    g.Clear(Color.Transparent);
+                    g.CompositingMode = CompositingMode.SourceCopy;
+                    g.CompositingQuality = CompositingQuality.HighQuality;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.SmoothingMode = SmoothingMode.HighQuality;
+                    float scale = Math.Min((float)width / source.Width, (float)height / source.Height);
+                    int dw = (int)Math.Round(source.Width * scale), dh = (int)Math.Round(source.Height * scale);
+                    g.DrawImage(source, new Rectangle((width-dw)/2, (height-dh)/2, dw, dh));
+                }
+                return result;
+            }
+        } catch { return null; }
+    }
+
+    private static Bitmap BuildWordmark(string text, int width, int height, bool dark) {
+        Bitmap bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        try {
+            using (Graphics g = Graphics.FromImage(bitmap)) {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                string[] candidates = new string[] { "Segoe Print", "Segoe Script", "Segoe UI" };
+                GraphicsPath glyphs = null;
+                FontFamily family = null;
+                RectangleF bounds = RectangleF.Empty;
                 try {
-                    using (MemoryStream ms = new MemoryStream(File.ReadAllBytes(logoPath)))
-                    using (Image img = Image.FromStream(ms)) { _logo = new Bitmap(img); }
-                } catch { _logo = null; }
-            }
-
-            using (Graphics g = CreateGraphics()) { _k = g.DpiX / 96f; }
-            string face = "Microsoft YaHei UI";
-            _titleFont = new Font(face, 11.5f, FontStyle.Bold);
-            _stageFont = new Font(face, 9f);
-            _timeFont  = new Font("Segoe UI Semibold", 10f);
-
-            Text = title;
-            FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            TopMost = true;
-            StartPosition = FormStartPosition.Manual;
-            BackColor = _bg;
-            ClientSize = new Size(S(440), S(124));
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
-                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-
-            _tick = new System.Windows.Forms.Timer();
-            _tick.Interval = 16;
-            _tick.Tick += delegate(object s, EventArgs e) {
-                _shown += (Target - _shown) * 0.12f;
-                if (Math.Abs(Target - _shown) < 0.05f) { _shown = Target; }
-                _phase += 0.012f;
-                if (_phase > 1.6f) { _phase = -0.6f; }
-                Invalidate();
-            };
-            _tick.Start();
-        }
-
-        private int S(float v) { return (int)Math.Round(v * _k); }
-
-        protected override CreateParams CreateParams {
-            get {
-                CreateParams cp = base.CreateParams;
-                cp.ExStyle |= 0x80;          // WS_EX_TOOLWINDOW: keep out of Alt-Tab
-                return cp;
-            }
-        }
-
-        protected override void OnHandleCreated(EventArgs e) {
-            base.OnHandleCreated(e);
-            // Windows 11: native rounded corners + DWM shadow on a borderless window.
-            // On older systems both calls fail harmlessly and the card is square.
-            try {
-                int round = 2;               // DWMWCP_ROUND
-                DwmSetWindowAttribute(Handle, 33, ref round, 4);
-                int policy = 2;              // DWMNCRP_ENABLED, needed for the shadow
-                DwmSetWindowAttribute(Handle, 2, ref policy, 4);
-                Margins m = new Margins(); m.L = 0; m.R = 0; m.T = 0; m.B = 1;
-                DwmExtendFrameIntoClientArea(Handle, ref m);
-                int border = ColorTranslator.ToWin32(_edge);
-                DwmSetWindowAttribute(Handle, 34, ref border, 4);   // DWMWA_BORDER_COLOR
-            } catch { }
-        }
-
-        // Handle is created before Show, which defeats CenterScreen; centre by hand
-        // on the monitor under the cursor (where the shortcut was just clicked).
-        protected override void OnLoad(EventArgs e) {
-            base.OnLoad(e);
-            Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
-            Location = new Point(wa.X + (wa.Width - Width) / 2, wa.Y + (wa.Height - Height) / 2);
-        }
-
-        private static GraphicsPath Pill(RectangleF r) {
-            GraphicsPath p = new GraphicsPath();
-            float d = r.Height;
-            if (r.Width < d) { r.Width = d; }
-            p.AddArc(r.X, r.Y, d, d, 90, 180);
-            p.AddArc(r.Right - d, r.Y, d, d, 270, 180);
-            p.CloseFigure();
-            return p;
-        }
-
-        protected override void OnPaint(PaintEventArgs e) {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.Clear(_bg);
-
-            int pad = S(22);
-            int logo = S(44);
-            if (_logo != null) { g.DrawImage(_logo, new Rectangle(pad - S(2), S(20), logo, logo)); }
-            int tx = _logo != null ? pad + logo + S(12) : pad;
-
-            TimeSpan el = DateTime.Now - _start;
-            string time = string.Format("{0}:{1:00}", (int)el.TotalMinutes, el.Seconds);
-            SizeF ts = g.MeasureString(time, _timeFont);
-            float timeX = ClientSize.Width - pad - ts.Width;
-
-            using (SolidBrush fg = new SolidBrush(_fg))
-            using (SolidBrush sub = new SolidBrush(_sub)) {
-                g.DrawString(Title, _titleFont, fg, tx - S(2), S(20));
-                RectangleF stageRect = new RectangleF(tx - S(1), S(46), timeX - tx, S(22));
-                using (StringFormat sf = new StringFormat(StringFormatFlags.NoWrap)) {
-                    sf.Trimming = StringTrimming.EllipsisCharacter;
-                    g.DrawString(Stage, _stageFont, sub, stageRect, sf);
-                }
-                g.DrawString(time, _timeFont, sub, timeX, S(22));
-            }
-
-            // Progress bar: rounded track, gradient fill, travelling highlight.
-            RectangleF track = new RectangleF(pad, S(88), ClientSize.Width - 2 * pad, S(6));
-            using (GraphicsPath tp = Pill(track))
-            using (SolidBrush tb = new SolidBrush(_track)) { g.FillPath(tb, tp); }
-            float w = track.Width * Math.Max(0f, Math.Min(100f, _shown)) / 100f;
-            if (w > 0.5f) {
-                RectangleF fill = new RectangleF(track.X, track.Y, Math.Max(w, track.Height), track.Height);
-                using (GraphicsPath fp = Pill(fill)) {
-                    using (LinearGradientBrush lb = new LinearGradientBrush(
-                               new RectangleF(track.X - 1, track.Y, track.Width + 2, track.Height),
-                               Accent1, Accent2, LinearGradientMode.Horizontal)) {
-                        g.FillPath(lb, fp);
-                    }
-                    if (_shown < 99.5f) {
-                        float bw = track.Width * 0.22f;
-                        float bx = track.X + _phase * track.Width - bw / 2;
-                        RectangleF band = new RectangleF(bx, track.Y, bw, track.Height);
-                        Region old = g.Clip;
-                        g.SetClip(fp, CombineMode.Intersect);
-                        using (LinearGradientBrush sb = new LinearGradientBrush(
-                                   new RectangleF(bx - 1, track.Y, bw + 2, track.Height),
-                                   Color.FromArgb(0, 255, 255, 255), Color.FromArgb(0, 255, 255, 255),
-                                   LinearGradientMode.Horizontal)) {
-                            ColorBlend cb = new ColorBlend(3);
-                            cb.Colors = new Color[] { Color.FromArgb(0, 255, 255, 255), Color.FromArgb(150, 255, 255, 255), Color.FromArgb(0, 255, 255, 255) };
-                            cb.Positions = new float[] { 0f, 0.5f, 1f };
-                            sb.InterpolationColors = cb;
-                            g.FillRectangle(sb, band);
+                    foreach (string candidate in candidates) {
+                        try {
+                            family = new FontFamily(candidate);
+                            glyphs = new GraphicsPath();
+                            glyphs.AddString(text, family, (int)FontStyle.Bold, 40f, PointF.Empty, StringFormat.GenericDefault);
+                            bounds = glyphs.GetBounds();
+                            if (bounds.Width > 0.1f && bounds.Height > 0.1f) break;
+                            glyphs.Dispose(); glyphs = null; family.Dispose(); family = null;
+                        } catch {
+                            if (glyphs != null) { glyphs.Dispose(); glyphs = null; }
+                            if (family != null) { family.Dispose(); family = null; }
                         }
-                        g.Clip = old;
                     }
+                    if (glyphs == null || family == null) return bitmap;
+                    float marginX = Math.Max(2f, width * 0.012f);
+                    float marginY = Math.Max(2f, height * 0.06f);
+                    float scale = Math.Min((width - marginX * 2f) / bounds.Width,
+                                           (height - marginY * 2f) / bounds.Height);
+                    float drawWidth = bounds.Width * scale, drawHeight = bounds.Height * scale;
+                    using (Matrix transform = new Matrix(scale, 0f, 0f, scale,
+                        (width - drawWidth) / 2f - bounds.X * scale,
+                        (height - drawHeight) / 2f - bounds.Y * scale))
+                        glyphs.Transform(transform);
+                    RectangleF fitted = glyphs.GetBounds();
+                    Color start = dark ? Color.FromArgb(157, 184, 255) : Color.FromArgb(69, 111, 246);
+                    Color end = dark ? Color.FromArgb(207, 166, 255) : Color.FromArgb(145, 91, 221);
+                    using (LinearGradientBrush fill = new LinearGradientBrush(fitted, start, end, LinearGradientMode.Horizontal))
+                    using (Pen outline = new Pen(dark ? Color.FromArgb(54, 245, 245, 255) : Color.FromArgb(210, 255, 255, 255), Math.Max(0.7f, width / 520f))) {
+                        outline.LineJoin = LineJoin.Round;
+                        g.DrawPath(outline, glyphs);
+                        g.FillPath(fill, glyphs);
+                    }
+                } finally {
+                    if (glyphs != null) glyphs.Dispose();
+                    if (family != null) family.Dispose();
                 }
             }
-        }
-
-        protected override void OnFormClosed(FormClosedEventArgs e) {
-            _tick.Stop();
-            base.OnFormClosed(e);
+            return bitmap;
+        } catch {
+            bitmap.Dispose();
+            throw;
         }
     }
 
-    // Launch-progress window. It lives on its own background STA thread with a
-    // real message pump (Application.Run), so it keeps painting while the
-    // launcher thread blocks in Start-Sleep polling loops and never shows
-    // "Not Responding" during the up-to-90s readiness wait. The launcher only
-    // calls the static methods below; each update is marshalled onto the
-    // window thread via BeginInvoke, which is safe from any thread.
-    public static class DshProgress {
-        [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
-        private static DshProgressForm _form;
-        private static Thread _thread;
-        private static readonly object _lock = new object();
-        private static readonly ManualResetEvent _ready = new ManualResetEvent(false);
+    private static GraphicsPath CreateFooterPath(string text, FontFamily family, float emSize) {
+        GraphicsPath path = new GraphicsPath();
+        path.AddString(text, family, (int)FontStyle.Regular, emSize, PointF.Empty, StringFormat.GenericTypographic);
+        return path;
+    }
 
-        // Create the window on its own STA thread and wait until it exists.
-        // Returns false when no window could be created within 5 seconds.
-        public static bool Show(string title, string stage, string logoPath) {
-            lock (_lock) {
-                if (_thread != null) { return true; }
-                _ready.Reset();
-                _thread = new Thread(delegate() {
-                    try { SetProcessDPIAware(); } catch { }
-                    Application.EnableVisualStyles();
-                    DshProgressForm f = new DshProgressForm(title, stage, logoPath);
-                    // Create the handle before the form is published: once Show's
-                    // _ready gate opens, callers may BeginInvoke immediately, and
-                    // BeginInvoke on a handle-less control throws.
-                    IntPtr h = f.Handle;
-                    _form = f;
-                    _ready.Set();
-                    Application.Run(f);
-                });
-                _thread.SetApartmentState(ApartmentState.STA);
-                _thread.IsBackground = true;
-                _thread.Start();
+    private static Bitmap BuildFooterArtwork(string text, int width, int height, float emSize, bool ellipsize, bool dark) {
+        Bitmap bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        try {
+            using (Graphics g = Graphics.FromImage(bitmap)) {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                string[] candidates = new string[] { "KaiTi", "楷体", "Microsoft YaHei UI" };
+                FontFamily family = null;
+                GraphicsPath glyphs = null;
+                try {
+                    foreach (string candidate in candidates) {
+                        try {
+                            family = new FontFamily(candidate);
+                            glyphs = CreateFooterPath(text, family, emSize);
+                            if (glyphs.PointCount > 0) break;
+                            glyphs.Dispose(); glyphs = null; family.Dispose(); family = null;
+                        } catch {
+                            if (glyphs != null) { glyphs.Dispose(); glyphs = null; }
+                            if (family != null) { family.Dispose(); family = null; }
+                        }
+                    }
+                    if (glyphs == null || family == null) return bitmap;
+
+                    RectangleF measured = glyphs.GetBounds();
+                    float maxWidth = Math.Max(1f, width - 2f);
+                    if (ellipsize && measured.Width > maxWidth) {
+                        List<string> elements = new List<string>();
+                        System.Globalization.TextElementEnumerator iter = System.Globalization.StringInfo.GetTextElementEnumerator(text);
+                        while (iter.MoveNext()) elements.Add(iter.GetTextElement());
+                        int low = 0, high = elements.Count;
+                        GraphicsPath best = null;
+                        while (low <= high) {
+                            int count = low + (high - low) / 2;
+                            string candidateText = string.Concat(elements.GetRange(0, count).ToArray()) + "…";
+                            GraphicsPath trial = CreateFooterPath(candidateText, family, emSize);
+                            float candidateWidth = trial.GetBounds().Width;
+                            if (candidateWidth <= maxWidth) {
+                                if (best != null) best.Dispose();
+                                best = trial; low = count + 1;
+                            } else {
+                                trial.Dispose(); high = count - 1;
+                            }
+                        }
+                        glyphs.Dispose();
+                        glyphs = best ?? CreateFooterPath("…", family, emSize);
+                        measured = glyphs.GetBounds();
+                    }
+
+                    float marginY = Math.Max(1f, height * 0.04f);
+                    float scale = Math.Min(1f, (height - marginY * 2f) / Math.Max(1f, measured.Height));
+                    float drawHeight = measured.Height * scale;
+                    using (Matrix transform = new Matrix(scale, 0f, 0f, scale,
+                        1f - measured.X * scale,
+                        (height - drawHeight) / 2f - measured.Y * scale))
+                        glyphs.Transform(transform);
+
+                    RectangleF fitted = glyphs.GetBounds();
+                    Color start = dark ? Color.FromArgb(157, 184, 255) : Color.FromArgb(69, 111, 246);
+                    Color end = dark ? Color.FromArgb(207, 166, 255) : Color.FromArgb(145, 91, 221);
+                    using (LinearGradientBrush fill = new LinearGradientBrush(fitted, start, end, LinearGradientMode.Horizontal))
+                    using (Pen outline = new Pen(dark ? Color.FromArgb(54, 245, 245, 255) : Color.FromArgb(175, 255, 255, 255), 0.8f)) {
+                        outline.LineJoin = LineJoin.Round;
+                        g.DrawPath(outline, glyphs);
+                        g.FillPath(fill, glyphs);
+                    }
+                } finally {
+                    if (glyphs != null) glyphs.Dispose();
+                    if (family != null) family.Dispose();
+                }
             }
-            return _ready.WaitOne(5000);
-        }
-
-        // Thread-safe update: the launcher thread posts, the window thread applies.
-        public static void SetStage(int percent, string stage) {
-            DshProgressForm f;
-            lock (_lock) { f = _form; }
-            if (f == null || f.IsDisposed) { return; }
-            float p = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
-            f.BeginInvoke((MethodInvoker)delegate() {
-                f.Target = p;
-                f.Stage = stage;
-                f.Invalidate();
-            });
-        }
-
-        // Close the window and wait briefly for its thread to finish.
-        public static void Close() {
-            DshProgressForm f;
-            Thread t;
-            lock (_lock) { f = _form; t = _thread; _form = null; }
-            if (f == null) { return; }
-            f.BeginInvoke((MethodInvoker)delegate() { f.Close(); });
-            if (t != null && t != Thread.CurrentThread) { t.Join(3000); }
+            return bitmap;
+        } catch {
+            bitmap.Dispose();
+            throw;
         }
     }
+
+    private void UpdateTimeArtwork() {
+        TimeSpan elapsed = DateTime.Now - _start;
+        string text = elapsed.TotalHours >= 1
+            ? string.Format("用时  {0}:{1:00}:{2:00}", (int)elapsed.TotalHours, elapsed.Minutes, elapsed.Seconds)
+            : string.Format("用时  {0}:{1:00}", (int)elapsed.TotalMinutes, elapsed.Seconds);
+        if (text == _lastTimeText) return;
+        Bitmap next = BuildFooterArtwork(text, S(230), S(24), S(18), false, _dark);
+        Bitmap old = _timeArt;
+        _timeArt = next;
+        _lastTimeText = text;
+        if (old != null) old.Dispose();
+        Invalidate(new Rectangle(S(44), S(260), S(240), S(29)));
+    }
+
+    private GraphicsPath CardPath(Rectangle r, int radius) {
+        GraphicsPath p = new GraphicsPath();
+        int d = Math.Max(2, radius * 2);
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right-d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right-d, r.Bottom-d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom-d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    private void UpdateCardRegion() {
+        if (_updatingRegion || !IsHandleCreated || IsDisposed || ClientSize.Width < 2 || ClientSize.Height < 2) return;
+        if (_regionSize == ClientSize && Region != null) return;
+        _updatingRegion = true;
+        try {
+            using (GraphicsPath path = CardPath(new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), S(22))) {
+                // Control.Region owns this object and disposes its previous value.
+                Region = new Region(path);
+            }
+            _regionSize = ClientSize;
+        } finally {
+            _updatingRegion = false;
+        }
+    }
+
+    private Bitmap BuildBackground(int width, int height) {
+        Bitmap b = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        using (Graphics g = Graphics.FromImage(b)) {
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle bounds = new Rectangle(0, 0, width, height);
+            using (GraphicsPath card = CardPath(bounds, S(22)))
+            using (LinearGradientBrush fill = new LinearGradientBrush(bounds, _bg, _bgEnd, LinearGradientMode.Vertical))
+                g.FillPath(fill, card);
+            RectangleF arc = new RectangleF(width-S(295), height-S(174), S(310), S(230));
+            using (GraphicsPath glowPath = new GraphicsPath()) {
+                glowPath.AddEllipse(arc);
+                using (PathGradientBrush glow = new PathGradientBrush(glowPath)) {
+                    glow.CenterColor = Color.FromArgb(22, 103, 147, 255);
+                    glow.SurroundColors = new Color[] { Color.FromArgb(0, 147, 136, 235) };
+                    g.FillPath(glow, glowPath);
+                }
+            }
+            using (Pen blue = new Pen(Color.FromArgb(18, 104, 149, 242), Math.Max(1f, S(1))))
+            using (Pen violet = new Pen(Color.FromArgb(14, 146, 112, 220), Math.Max(1f, S(1)))) {
+                g.DrawArc(blue, width-S(286), height-S(151), S(286), S(188), 194, 132);
+                g.DrawArc(violet, width-S(249), height-S(130), S(249), S(162), 198, 120);
+            }
+        }
+        return b;
+    }
+
+    protected override CreateParams CreateParams {
+        get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; }
+    }
+
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        try {
+            _regionSize = Size.Empty;
+            UpdateCardRegion();
+            int round = 2; DwmSetWindowAttribute(Handle, 33, ref round, 4);
+            int policy = 2; DwmSetWindowAttribute(Handle, 2, ref policy, 4);
+            Margins m = new Margins(); m.B = 1; DwmExtendFrameIntoClientArea(Handle, ref m);
+            int border = ColorTranslator.ToWin32(_edge);
+            DwmSetWindowAttribute(Handle, 34, ref border, 4);
+        } catch { }
+    }
+
+    protected override void OnSizeChanged(EventArgs e) {
+        base.OnSizeChanged(e);
+        try { UpdateCardRegion(); } catch { }
+    }
+
+    protected override void OnLoad(EventArgs e) {
+        base.OnLoad(e);
+        Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+        Location = new Point(wa.X + (wa.Width - Width) / 2, wa.Y + (wa.Height - Height) / 2);
+    }
+
+    private static GraphicsPath Pill(RectangleF r) {
+        GraphicsPath p = new GraphicsPath();
+        float d = r.Height;
+        p.AddArc(r.X, r.Y, d, d, 90, 180);
+        p.AddArc(r.Right-d, r.Y, d, d, 270, 180);
+        p.CloseFigure();
+        return p;
+    }
+
+    public void SetProgress(int percent, string stage) {
+        _shown = Math.Max(0, Math.Min(100, percent));
+        if (stage != Stage) {
+            Stage = stage;
+            Bitmap next = BuildFooterArtwork(Stage, S(430), S(36), S(24), true, _dark);
+            Bitmap old = _stageArt;
+            _stageArt = next;
+            if (old != null) old.Dispose();
+            Invalidate(new Rectangle(S(44), S(216), S(440), S(40)));
+        }
+        Invalidate(new Rectangle(S(44), S(288), S(672), S(12)));
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        if (_background != null) g.DrawImageUnscaled(_background, 0, 0);
+        else g.Clear(_bg);
+
+        if (_logo != null) g.DrawImageUnscaled(_logo, S(48), S(68));
+        if (_mascot != null) g.DrawImageUnscaled(_mascot, S(490), S(16));
+
+        if (_wordmark != null) g.DrawImageUnscaled(_wordmark, S(110), S(64));
+        if (_stageArt != null) g.DrawImageUnscaled(_stageArt, S(48), S(218));
+        if (_timeArt != null) g.DrawImageUnscaled(_timeArt, S(48), S(262));
+
+        RectangleF track = new RectangleF(S(48), S(292), S(664), S(5));
+        using (GraphicsPath tp = Pill(track))
+        using (SolidBrush tb = new SolidBrush(_track)) g.FillPath(tb, tp);
+        float w = track.Width * _shown / 100f;
+        if (w > 0.5f) {
+            RectangleF fill = new RectangleF(track.X, track.Y, Math.Max(w, track.Height), track.Height);
+            using (GraphicsPath fp = Pill(fill))
+            using (LinearGradientBrush accent = new LinearGradientBrush(track, Accent1, Accent2, LinearGradientMode.Horizontal))
+                g.FillPath(accent, fp);
+        }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e) {
+        if (_tick != null) _tick.Stop();
+        base.OnFormClosed(e);
+    }
+
+    protected override void Dispose(bool disposing) {
+        if (disposing) {
+            if (_tick != null) { _tick.Stop(); _tick.Dispose(); }
+            if (_logo != null) _logo.Dispose();
+            if (_mascot != null) _mascot.Dispose();
+            if (_background != null) _background.Dispose();
+            if (_wordmark != null) _wordmark.Dispose();
+            if (_stageArt != null) _stageArt.Dispose();
+            if (_timeArt != null) _timeArt.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+public static class DshProgress {
+    [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
+    private static DshProgressForm _form;
+    private static Thread _thread;
+    private static readonly object _lock = new object();
+    private static readonly ManualResetEvent _ready = new ManualResetEvent(false);
+
+    public static bool Show(string title, string stage, string logoPath) {
+        string mascotPath = Path.Combine(Path.GetDirectoryName(logoPath) ?? "", "whale-maid-static.png");
+        return Show(title, stage, logoPath, mascotPath, true);
+    }
+    public static bool Show(string title, string stage, string logoPath, bool staticMascot) {
+        string mascotPath = Path.Combine(Path.GetDirectoryName(logoPath) ?? "", "whale-maid-static.png");
+        return Show(title, stage, logoPath, mascotPath, true);
+    }
+    public static bool Show(string title, string stage, string logoPath, string mascotPath, bool staticMascot) {
+        lock (_lock) {
+            if (_thread != null && _thread.IsAlive) return _form != null;
+            _thread = null; _form = null; _ready.Reset();
+            _thread = new Thread(delegate() {
+                try { SetProcessDPIAware(); } catch { }
+                Application.EnableVisualStyles();
+                DshProgressForm f = new DshProgressForm(title, stage, logoPath, mascotPath);
+                IntPtr handle = f.Handle;
+                _form = f; _ready.Set(); Application.Run(f);
+            });
+            _thread.SetApartmentState(ApartmentState.STA);
+            _thread.IsBackground = true;
+            _thread.Start();
+        }
+        return _ready.WaitOne(5000);
+    }
+    public static void SetStage(int percent, string stage) {
+        DshProgressForm f;
+        lock (_lock) { f = _form; }
+        if (f == null || f.IsDisposed) return;
+        int p = Math.Max(0, Math.Min(100, percent));
+        try { f.BeginInvoke((MethodInvoker)delegate() { f.SetProgress(p, stage); }); }
+        catch (InvalidOperationException) { }
+    }
+    public static void Close() {
+        DshProgressForm f; Thread t;
+        lock (_lock) { f = _form; t = _thread; _form = null; }
+        if (f != null && !f.IsDisposed) {
+            try { f.BeginInvoke((MethodInvoker)delegate() { f.Close(); }); }
+            catch (InvalidOperationException) { }
+        }
+        if (t != null && t != Thread.CurrentThread && t.Join(3000))
+            lock (_lock) { if (_thread == t) { _thread = null; _form = null; } }
+    }
+}
 "@ -ReferencedAssemblies @('System.Windows.Forms.dll','System.Drawing.dll')
 
 function Show-ProgressWindow {
     param([string]$Stage)
-    # Fail loudly if the window cannot appear: a silent no-window launch would
-    # regress the whole point of this file.
+    # Fail loudly if the window cannot appear. Both real startup and preview use
+    # the edited standing mascot; the legacy -StaticMascot switch is accepted.
     $logo = Join-Path $PSScriptRoot 'deepseek-logo.png'
-    if (-not [DshProgress]::Show('DeepSeek Harness', $Stage, $logo)) {
+    $mascot = Join-Path $PSScriptRoot 'whale-maid-static.png'
+    if (-not [DshProgress]::Show('DeepSeek Harness', $Stage, $logo, $mascot, $true)) {
         throw 'The progress window failed to appear.'
     }
 }
@@ -488,6 +692,22 @@ function Get-PortOwnerPid {
 try {
     # --- launch progress window ---------------------------------------------
     Show-ProgressWindow -Stage '正在启动…'
+
+    if ($Preview) {
+        $previewMs = [Math]::Max(1000, $PreviewSeconds * 1000)
+        $previewStages = @(@(10, '正在检查本地启动配置…'), @(38, '正在准备 DeepSeek Harness…'), @(68, '正在等待服务就绪…'), @(91, '正在打开浏览器…'))
+        $each = [Math]::Max(1, [int]($previewMs / $previewStages.Count))
+        foreach ($item in $previewStages) {
+            [DshProgress]::SetStage($item[0], $item[1])
+            Start-Sleep -Milliseconds $each
+        }
+        [DshProgress]::SetStage(100, '预览完成')
+        Start-Sleep -Milliseconds 500
+        [DshProgress]::Close()
+        exit 0
+    }
+
+    if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 
     if (-not (Test-Path -LiteralPath $runDir)) { New-Item -ItemType Directory -Path $runDir -Force | Out-Null }
 
