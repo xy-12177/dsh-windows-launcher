@@ -18,7 +18,7 @@ A Windows desktop launcher for [DeepSeek Harness](https://www.npmjs.com/package/
 
 进度窗必须在 dsh 启动前就出现，所以它做不成 dsh 插件（插件要等服务起来才会加载）。
 
-配合起来的效果：**点图标 → 进度窗 → 浏览器打开；再点图标 → 冷启动。**
+配合起来的效果：**点图标 → 进度窗 → 浏览器打开；服务还在运行时再次点击会复用实例，服务关闭后再次点击才会冷启动。**
 
 ## 环境要求
 
@@ -36,6 +36,31 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 安装时，`install.ps1` 会把 `launcher\` 中的启动脚本、静态角色图和图标一并复制到 `%LOCALAPPDATA%\DeepSeekHarness`。
 
+## 直接使用源码（本机当前方式）
+
+本机桌面快捷方式直接调用 `D:\deepseek harness\dsh-windows-launcher\launcher\start-dsh.vbs`。启动、停止脚本和素材只维护 `launcher/` 这一份，不需要在父目录复制一套。
+
+从仓库根目录运行以下命令可创建或更新快捷方式，并跳过插件注册：
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -UseSource -SkipPlugin -WorkDir 'D:\deepseek harness' -Port 4080
+```
+
+`-UseSource` 不复制启动脚本，并保留已有快捷方式的名称和图标。新快捷方式的图标单独放在 `%LOCALAPPDATA%\DeepSeekHarness`，避免 DSH 工作区的完整性标签使图标变空白。重复安装时，未明确传入的端口、工作目录和浏览器模式沿用 `launcher/dsh-launcher.json`；普通复制安装仍使用原来的默认设置。
+
+本机启动配置为端口 `4080`、工作目录 `D:\deepseek harness`、`appWindow=false`。配置与运行日志均留在 `launcher/`：`dsh-launcher.json`、`.run/server.log`、`.run/server.err` 和自动生成的 `.run/state.json` 都被 Git 忽略。
+
+整理前的服务日志保留在 `launcher/.run/history/`，不与之后启动生成的新日志混用。
+
+也可以直接启动或停止：
+
+```powershell
+& "$env:SystemRoot\System32\wscript.exe" 'D:\deepseek harness\dsh-windows-launcher\launcher\start-dsh.vbs'
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File 'D:\deepseek harness\dsh-windows-launcher\launcher\stop-dsh.ps1'
+```
+
+`stop-dsh.ps1` 默认读取同目录配置的端口；显式指定 `-Port` 可覆盖。当前自动关闭插件仍链接独立的 `D:\deepseek harness\dsh-auto-shutdown`，因此该目录必须保留，整理启动器不改变插件配置。
+
 ## 预览
 
 可以安全预览启动窗口，而不启动 `dsh` 或浏览器，也不会创建工作目录或 `.run` 状态文件：
@@ -45,6 +70,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File launcher\start-dsh.ps1 -Prev
 ```
 
 预览默认显示12秒，使用与真实启动相同的开心站姿静态角色。可延长预览时间：
+
+窗口中的产品名使用蓝紫艺术字，启动阶段使用青蓝/青绿字色，用时使用珊瑚/玫瑰色；启动中的三点省略号依次轻跳，完成或失败时停止。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File launcher\start-dsh.ps1 -Preview -PreviewSeconds 30

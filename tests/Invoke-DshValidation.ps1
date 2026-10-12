@@ -80,6 +80,26 @@ if ($Mode -eq 'Capture') {
                 $form.SetProgress(68,'正在等待服务就绪…')
                 if ($form.Stage -ne '正在等待服务就绪…') { throw 'SetProgress did not update the stage text.' }
                 if ($null -eq $form.GetType().GetField('_stageArt',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($form)) { throw 'SetProgress did not produce cached stage artwork.' }
+                $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+                $loadingField = $form.GetType().GetField('_isLoading',$flags)
+                $inkField = $form.GetType().GetField('_stageInkRight',$flags)
+                $boundsField = $form.GetType().GetField('_dotBounds',$flags)
+                if (-not $loadingField.GetValue($form)) { throw 'A nonterminal stage did not enter loading-dot mode.' }
+                $inkRight = [float]$inkField.GetValue($form)
+                $dotBounds = [Drawing.Rectangle]$boundsField.GetValue($form)
+                if ($dotBounds.IsEmpty -or $dotBounds.Left -le (52*$scale+$inkRight) -or $dotBounds.Right -gt 482*$scale) { throw "Loading-dot bounds overlap stage glyphs or escape the stage field: $dotBounds, inkRight=$inkRight." }
+                $longStage = '正在检查本地配置并准备 DeepSeek Harness 服务环境，随后等待服务启动就绪…'
+                $form.SetProgress(68,$longStage)
+                $loadingArt = $form.GetType().GetField('_stageArt',$flags).GetValue($form)
+                $loadingInk = [float]$inkField.GetValue($form)
+                if (-not $loadingField.GetValue($form)) { throw 'Long nonterminal stage did not reserve its loading dots.' }
+                $form.SetProgress(100,$longStage)
+                $terminalArt = $form.GetType().GetField('_stageArt',$flags).GetValue($form)
+                if ($form.Stage -ne $longStage -or $loadingField.GetValue($form) -or [object]::ReferenceEquals($loadingArt,$terminalArt)) { throw 'Same-text completion did not stop dots and rebuild the stage cache.' }
+                if ([float]$inkField.GetValue($form) -lt $loadingInk) { throw 'Terminal stage failed to restore width previously reserved for dots.' }
+                $form.SetProgress(45,'服务启动失败…')
+                if ($form.Stage -ne '服务启动失败…' -or $loadingField.GetValue($form)) { throw 'Failure state retained loading dots or changed the public stage unexpectedly.' }
+                $form.SetProgress(68,'正在等待服务就绪…')
                 $form.CreateControl()
                 $bmp = [Drawing.Bitmap]::new($form.ClientSize.Width,$form.ClientSize.Height)
                 try {

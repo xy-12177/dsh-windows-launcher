@@ -100,6 +100,10 @@ public class DshProgressForm : Form {
     private readonly Bitmap _logo, _mascot, _wordmark;
     private Bitmap _background;
     private Bitmap _stageArt, _timeArt;
+    private float _stageInkRight;
+    private float _dotPhase;
+    private bool _isLoading;
+    private Rectangle _dotBounds = Rectangle.Empty;
     private readonly float _k;
     private readonly Color _bg, _bgEnd, _track, _edge;
     private readonly bool _dark;
@@ -140,18 +144,26 @@ public class DshProgressForm : Form {
         BackColor = _bg;
         ClientSize = new Size(S(760), S(360));
         _wordmark = BuildWordmark(Title, S(340), S(49), dark);
-        _stageArt = BuildFooterArtwork(Stage, S(430), S(36), S(24), true, dark);
+        string displayStage = NormalizeStage(Stage);
+        _isLoading = !IsTerminalStage(0, displayStage);
+        _stageArt = BuildFooterArtwork(displayStage, S(430), S(36), S(24), dark, false, _isLoading, out _stageInkRight);
+        _dotBounds = GetDotBounds();
         UpdateTimeArtwork();
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         _background = BuildBackground(ClientSize.Width, ClientSize.Height);
         _tick = new System.Windows.Forms.Timer();
-        _tick.Interval = 1000;
+        _tick.Interval = 100;
         _tick.Tick += delegate(object s, EventArgs e) {
             int second = (int)(DateTime.Now - _start).TotalSeconds;
             if (second != _lastSecond) {
                 _lastSecond = second;
                 UpdateTimeArtwork();
+            }
+            if (_isLoading) {
+                _dotPhase += 0.42f;
+                if (_dotPhase >= (float)(Math.PI * 2.0)) _dotPhase -= (float)(Math.PI * 2.0);
+                if (!_dotBounds.IsEmpty) Invalidate(_dotBounds);
             }
         };
         _tick.Start();
@@ -238,11 +250,31 @@ public class DshProgressForm : Form {
 
     private static GraphicsPath CreateFooterPath(string text, FontFamily family, float emSize) {
         GraphicsPath path = new GraphicsPath();
-        path.AddString(text, family, (int)FontStyle.Regular, emSize, PointF.Empty, StringFormat.GenericTypographic);
+        if (!string.IsNullOrEmpty(text))
+            path.AddString(text, family, (int)FontStyle.Regular, emSize, PointF.Empty, StringFormat.GenericTypographic);
         return path;
     }
 
-    private static Bitmap BuildFooterArtwork(string text, int width, int height, float emSize, bool ellipsize, bool dark) {
+    private static string NormalizeStage(string text) {
+        string value = (text ?? "").TrimEnd();
+        while (value.EndsWith("…", StringComparison.Ordinal) || value.EndsWith("...", StringComparison.Ordinal) || value.EndsWith(".", StringComparison.Ordinal)) {
+            if (value.EndsWith("...", StringComparison.Ordinal)) value = value.Substring(0, value.Length - 3).TrimEnd();
+            else value = value.Substring(0, value.Length - 1).TrimEnd();
+        }
+        return value;
+    }
+
+    private static bool IsTerminalStage(int percent, string stage) {
+        if (percent >= 100) return true;
+        string value = (stage ?? "").ToLowerInvariant();
+        return value.Contains("失败") || value.Contains("错误") || value.Contains("完成") ||
+               value.Contains("failed") || value.Contains("failure") || value.Contains("error") || value.Contains("complete") || value.Contains("done");
+    }
+
+    private static Bitmap BuildFooterArtwork(string text, int width, int height, float emSize, bool dark, bool warmPalette, bool reserveDots, out float inkRight) {
+        inkRight = 0f;
+        if (string.IsNullOrEmpty(text))
+            return new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
         Bitmap bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
         try {
             using (Graphics g = Graphics.FromImage(bitmap)) {
@@ -267,8 +299,9 @@ public class DshProgressForm : Form {
                     if (glyphs == null || family == null) return bitmap;
 
                     RectangleF measured = glyphs.GetBounds();
-                    float maxWidth = Math.Max(1f, width - 2f);
-                    if (ellipsize && measured.Width > maxWidth) {
+                    float dotReserve = reserveDots ? Math.Max(1f, emSize * 1.35f) : 0f;
+                    float maxWidth = Math.Max(1f, width - 2f - dotReserve);
+                    if (measured.Width > maxWidth) {
                         List<string> elements = new List<string>();
                         System.Globalization.TextElementEnumerator iter = System.Globalization.StringInfo.GetTextElementEnumerator(text);
                         while (iter.MoveNext()) elements.Add(iter.GetTextElement());
@@ -276,7 +309,8 @@ public class DshProgressForm : Form {
                         GraphicsPath best = null;
                         while (low <= high) {
                             int count = low + (high - low) / 2;
-                            string candidateText = string.Concat(elements.GetRange(0, count).ToArray()) + "…";
+                            string candidateText = string.Concat(elements.GetRange(0, count).ToArray());
+                            if (!reserveDots && count < elements.Count) candidateText += "…";
                             GraphicsPath trial = CreateFooterPath(candidateText, family, emSize);
                             float candidateWidth = trial.GetBounds().Width;
                             if (candidateWidth <= maxWidth) {
@@ -287,7 +321,7 @@ public class DshProgressForm : Form {
                             }
                         }
                         glyphs.Dispose();
-                        glyphs = best ?? CreateFooterPath("…", family, emSize);
+                        glyphs = best ?? CreateFooterPath("", family, emSize);
                         measured = glyphs.GetBounds();
                     }
 
@@ -300,14 +334,21 @@ public class DshProgressForm : Form {
                         glyphs.Transform(transform);
 
                     RectangleF fitted = glyphs.GetBounds();
-                    Color start = dark ? Color.FromArgb(157, 184, 255) : Color.FromArgb(69, 111, 246);
-                    Color end = dark ? Color.FromArgb(207, 166, 255) : Color.FromArgb(145, 91, 221);
+                    Color start, end;
+                    if (warmPalette) {
+                        start = dark ? Color.FromArgb(255, 183, 157) : Color.FromArgb(218, 91, 82);
+                        end = dark ? Color.FromArgb(255, 205, 184) : Color.FromArgb(196, 73, 127);
+                    } else {
+                        start = dark ? Color.FromArgb(124, 224, 236) : Color.FromArgb(12, 137, 166);
+                        end = dark ? Color.FromArgb(151, 228, 185) : Color.FromArgb(28, 151, 120);
+                    }
                     using (LinearGradientBrush fill = new LinearGradientBrush(fitted, start, end, LinearGradientMode.Horizontal))
                     using (Pen outline = new Pen(dark ? Color.FromArgb(54, 245, 245, 255) : Color.FromArgb(175, 255, 255, 255), 0.8f)) {
                         outline.LineJoin = LineJoin.Round;
                         g.DrawPath(outline, glyphs);
                         g.FillPath(fill, glyphs);
                     }
+                    inkRight = Math.Max(0f, fitted.Right + 1f);
                 } finally {
                     if (glyphs != null) glyphs.Dispose();
                     if (family != null) family.Dispose();
@@ -326,12 +367,47 @@ public class DshProgressForm : Form {
             ? string.Format("用时  {0}:{1:00}:{2:00}", (int)elapsed.TotalHours, elapsed.Minutes, elapsed.Seconds)
             : string.Format("用时  {0}:{1:00}", (int)elapsed.TotalMinutes, elapsed.Seconds);
         if (text == _lastTimeText) return;
-        Bitmap next = BuildFooterArtwork(text, S(230), S(24), S(18), false, _dark);
+        float ignoredInkRight;
+        Bitmap next = BuildFooterArtwork(text, S(230), S(24), S(18), _dark, true, false, out ignoredInkRight);
         Bitmap old = _timeArt;
         _timeArt = next;
         _lastTimeText = text;
         if (old != null) old.Dispose();
         Invalidate(new Rectangle(S(48), S(216), S(240), S(32)));
+    }
+
+    private Rectangle GetDotBounds() {
+        int diameter = Math.Max(3, S(5));
+        float radius = diameter / 2f;
+        float spacing = S(7);
+        float firstX = S(52) + (int)Math.Ceiling(_stageInkRight) + S(7);
+        float lastRight = firstX + spacing * 2f + radius;
+        float baseY = S(178) + S(18);
+        float maxLift = S(4);
+        int padding = Math.Max(2, S(1));
+        int left = (int)Math.Floor(firstX - radius) - padding;
+        int top = (int)Math.Floor(baseY - maxLift - radius) - padding;
+        int right = (int)Math.Ceiling(lastRight) + padding;
+        int bottom = (int)Math.Ceiling(baseY + radius) + padding;
+        return Rectangle.FromLTRB(left, top, right, bottom);
+    }
+
+    private void DrawLoadingDots(Graphics g) {
+        if (!_isLoading || _dotBounds.IsEmpty) return;
+        int diameter = Math.Max(3, S(5));
+        float radius = diameter / 2f;
+        float baseY = S(178) + S(18);
+        int firstX = S(52) + (int)Math.Ceiling(_stageInkRight) + S(7);
+        Color dotColor = _dark ? Color.FromArgb(151, 228, 185) : Color.FromArgb(28, 151, 120);
+        using (SolidBrush brush = new SolidBrush(dotColor)) {
+            for (int i = 0; i < 3; i++) {
+                double phase = _dotPhase - i * Math.PI * 0.72;
+                float lift = (float)Math.Max(0.0, Math.Sin(phase)) * S(4);
+                float x = firstX + i * S(7) - radius;
+                float y = baseY - lift - radius;
+                g.FillEllipse(brush, x, y, diameter, diameter);
+            }
+        }
     }
 
     private int MascotRightAt(int physicalY) {
@@ -471,13 +547,27 @@ public class DshProgressForm : Form {
 
     public void SetProgress(int percent, string stage) {
         _shown = Math.Max(0, Math.Min(100, percent));
-        if (stage != Stage) {
-            Stage = stage;
-            Bitmap next = BuildFooterArtwork(Stage, S(430), S(36), S(24), true, _dark);
+        string normalized = NormalizeStage(stage);
+        bool loading = !IsTerminalStage(_shown, normalized);
+        bool changed = stage != Stage;
+        bool loadingChanged = loading != _isLoading;
+        Rectangle previousDots = _dotBounds;
+        _isLoading = loading;
+        if (changed || loadingChanged) {
+            if (changed) Stage = stage;
+            Bitmap next = BuildFooterArtwork(normalized, S(430), S(36), S(24), _dark, false, _isLoading, out _stageInkRight);
             Bitmap old = _stageArt;
             _stageArt = next;
             if (old != null) old.Dispose();
-            Invalidate(new Rectangle(S(48), S(176), S(440), S(42)));
+            _dotBounds = GetDotBounds();
+        }
+        if (loadingChanged) {
+            if (_isLoading) _dotPhase = 0f;
+            Invalidate(previousDots);
+            Invalidate(_dotBounds);
+        }
+        if (changed) {
+            Invalidate(new Rectangle(S(48), S(172), S(450), S(52)));
         }
         Invalidate(new Rectangle(S(48), S(292), S(430), S(18)));
     }
@@ -492,6 +582,7 @@ public class DshProgressForm : Form {
         if (_logo != null) g.DrawImageUnscaled(_logo, S(50), S(101));
         if (_wordmark != null) g.DrawImageUnscaled(_wordmark, S(106), S(98));
         if (_stageArt != null) g.DrawImageUnscaled(_stageArt, S(52), S(178));
+        DrawLoadingDots(g);
         if (_timeArt != null) g.DrawImageUnscaled(_timeArt, S(52), S(220));
 
         RectangleF track = new RectangleF(S(52), S(296), S(420), S(10));
@@ -818,7 +909,7 @@ try {
         $m = [regex]::Match((Read-SharedText -Path $outLog), $pattern)
         if ($m.Success) { $url = $m.Value; break }
         if ($proc.HasExited) { break }
-        # The window runs its own elapsed clock and shimmer, so it reads as
+        # The window runs its own elapsed clock and loading-dot animation, so it reads as
         # alive during a wait that can last 90s; the bar itself only moves on
         # stage transitions (never on a timer).
         Start-Sleep -Milliseconds 200
